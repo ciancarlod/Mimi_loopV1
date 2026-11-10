@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   check-scripts:
     name: Check scripts
@@ -71,6 +74,7 @@ jobs:
               "build_v41y_ex",
               "build_v41z_ex",
               "proto_v41x_ex",
+              "ci_render_frames",
           ]
           # Need local media, or packages that are not in requirements.txt.
           skipped = {
@@ -122,96 +126,56 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Look for plates and see if a render entry point can run
-        id: gate
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python requirements
+        run: python -m pip install -r requirements.txt
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Download assets-v1 release
+        id: pack
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          assets_dir=false
-          release_asset=false
-          hardcoded=false
-
-          if [ -d assets ] && find assets -type f -print -quit | grep -q .; then
-            assets_dir=true
-          fi
-
-          names="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" --jq '.[].assets[].name' || true)"
-          if printf '%s\n' "$names" | grep -qx 'mimi-assets.tar.gz'; then
-            release_asset=true
-          fi
-
-          # Real entry points, inspected from the scripts. Both pin absolute paths.
-          # render_v41_span.py: no argv. Imports compositor from /workspace/lofi-v30-final,
-          # loads /workspace/lofi-v41-meow/cycle/*.npy, encodes the full 890s–915s span.
-          # build_v41ah_ex.py (latest builder): main() takes --preview and --mouth-ref,
-          # but P is Path('/workspace/lofi-v41-meow') and sibling imports are loaded from there.
-          if grep -q '/workspace/' scripts/render_v41_span.py scripts/build_v41ah_ex.py; then
-            hardcoded=true
-          fi
-
-          can_render=false
-          if [ "$hardcoded" = false ] && { [ "$assets_dir" = true ] || [ "$release_asset" = true ]; }; then
-            can_render=true
-          fi
-
-          {
-            echo "assets_dir=$assets_dir"
-            echo "release_asset=$release_asset"
-            echo "hardcoded=$hardcoded"
-            echo "can_render=$can_render"
-          } >> "$GITHUB_OUTPUT"
-
-          echo "assets/ present: $assets_dir"
-          echo "release asset mimi-assets.tar.gz: $release_asset"
-          echo "hard-coded /workspace paths: $hardcoded"
-          echo "can render: $can_render"
-
-      - name: Skip render until assets and paths are ready
-        if: steps.gate.outputs.can_render != 'true'
-        run: |
-          set -euo pipefail
-          assets_dir="${{ steps.gate.outputs.assets_dir }}"
-          release_asset="${{ steps.gate.outputs.release_asset }}"
-          hardcoded="${{ steps.gate.outputs.hardcoded }}"
-
-          {
+          if ! gh release view assets-v1 --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
             echo "Render test frames skipped."
-            echo
-            if [ "$assets_dir" != true ] && [ "$release_asset" != true ]; then
-              echo "Source plates and generated clips must be added to the repo or a release first."
-              echo "This job looks for an assets/ folder in the checkout, or a GitHub release asset named mimi-assets.tar.gz."
-              echo "Neither is available, so there is nothing to fetch."
-            else
-              echo "Asset source found (assets/: $assets_dir, release mimi-assets.tar.gz: $release_asset)."
-            fi
-            echo
-            if [ "$hardcoded" = true ]; then
-              echo "Rendering stays skipped because the scripts hard-code /workspace paths. Fetching assets into assets/ would not feed them."
-              echo "What would need to change before this job can render a few frames:"
-              echo
-              echo "- scripts/render_v41_span.py has no arguments. On launch it imports compositor from /workspace/lofi-v30-final, reads /workspace/lofi-v41-meow/cycle/v41-medium-cycle.npy, v41-mrrrp-cycle.npy, v41-growl-cycle.npy, v41-big-cycle.npy, and v41-medium-params.json, and encodes every frame from 890*24 through 915*24 into /workspace/lofi-v41-meow/work/v41-span-890-915-lossless.mkv and v41-test-25s.mp4. It needs an asset-root argument and a frame list that writes a few PNGs, instead of running the full span."
-              echo "- The latest builder is scripts/build_v41ah_ex.py. Entry point is main(), arguments --preview and --mouth-ref. It sets P = Path('/workspace/lofi-v41-meow'), inserts that directory on sys.path, and imports build_v41h, build_v41y_ex, build_v41z_ex, build_v41t_ex, and build_v41aa_ex. --preview still requires the u-ex plates, encodes v41u-ex through v41af-ex, the PCM stem, and mattes v41ab-ex/mattes/g1v3 and g2v3, and writes PNGs to /workspace/lofi-v41-meow/qc/v41ah-ex/preview. Point P (and those imports) at the fetched tree, and write the preview frames somewhere this job can upload."
-              echo
-              echo "No stand-in entry point is called. The render step stays skipped until those paths are parameterized and the plates are in assets/ or in the mimi-assets.tar.gz release."
-            fi
-          } | tee "$RUNNER_TEMP/render-skip.txt"
+            echo "Release assets-v1 is missing. Publish that tag with mimi-assets.part01.tar.gz, MANIFEST.txt, and SHA256SUMS before this job can render frames."
+            echo "::notice title=Render test frames skipped::Release assets-v1 is missing. Source plates and generated clips must be published on tag assets-v1 before this job can render frames."
+            exit 0
+          fi
+          mkdir -p "$HOME/mimi-release" "$HOME/mimi-extract"
+          gh release download assets-v1 \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir "$HOME/mimi-release"
+          (cd "$HOME/mimi-release" && sha256sum -c SHA256SUMS)
+          test -f "$HOME/mimi-release/mimi-assets.part01.tar.gz"
+          tar -xzf "$HOME/mimi-release/mimi-assets.part01.tar.gz" -C "$HOME/mimi-extract"
+          test -d "$HOME/mimi-extract/mimi-ci-pack"
+          echo "present=true" >> "$GITHUB_OUTPUT"
+          echo "MIMI_ROOT=$HOME/mimi-extract/mimi-ci-pack" >> "$GITHUB_ENV"
 
-          # Short annotation for the check summary. The full note is in the log above.
-          echo "::notice title=Render test frames skipped::Source plates and generated clips must be in assets/ or a release asset named mimi-assets.tar.gz, and render_v41_span.py / build_v41ah_ex.py must stop hard-coding /workspace before this job can render frames. See the step log."
-
-      - name: Fetch assets and render test frames
-        if: steps.gate.outputs.can_render == 'true'
+      - name: Render test frames
+        if: steps.pack.outputs.present == 'true'
         run: |
           set -euo pipefail
-          echo "Assets are present and the render scripts no longer hard-code /workspace."
-          echo "Wire this step to the real entry point (render_v41_span.py or build_v41ah_ex.py --preview) once it accepts an asset root and writes a few PNGs. No command is invented here."
-          exit 1
+          mkdir -p artifacts/frames
+          python scripts/ci_render_frames.py \
+            --root "$MIMI_ROOT" \
+            --builders-dir builders \
+            --frames 0,42,138,432 \
+            --out artifacts/frames
+          ls -l artifacts/frames
 
-      - name: Upload test frames
-        if: steps.gate.outputs.can_render == 'true'
+      - name: Upload test-frame PNGs
+        if: steps.pack.outputs.present == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: test-frames
-          path: test-frames/
+          name: v41ag-ex-test-frames
+          path: artifacts/frames/n*.png
           if-no-files-found: error

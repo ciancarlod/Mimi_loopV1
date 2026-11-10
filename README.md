@@ -6,7 +6,12 @@ Lo-fi looping video of a cat named Mimi. The picture is a 1280×720, 24 fps comp
 
 The source plates, generated clips, mattes, and renders are about **42 GB**. They stay off-repo, under `/workspace/lofi-v41-meow` on the machine that builds the loop (older rounds also read `/workspace/lofi-v30-final`, `/workspace/lofi-v30`, `/workspace/lofi-v28`, `/workspace/lofi-v24`, and `/workspace/ref-greenscreen`). Nothing in that tree is committed. `.gitignore` blocks video, image, audio, and numpy-array outputs, plus `qc/` and `genvid/`.
 
-To render in CI later, put the plates and clips in an `assets/` folder in the repo, or attach them to a GitHub release as `mimi-assets.tar.gz`. The current scripts will still not read that folder until their hard-coded `/workspace` paths take an asset root. See `.github/workflows/render-test-frames.yml`.
+CI renders four stills of `v41ag-ex` (frames 0, 42, 138, and 432) from the GitHub release `assets-v1`. That release is a small test-frame pack (`mimi-assets.part01.tar.gz`, about 16 MB), not the full inputs. The full source set (about 1 GB) stays off-repo. `scripts/ci_render_frames.py` takes `MIMI_ROOT` or `--root`, rewrites the hard-coded `/workspace` paths, and imports the builder copies in `builders/`. The original files in `scripts/` are unchanged.
+
+```bash
+tar -xzf mimi-assets.part01.tar.gz
+python scripts/ci_render_frames.py --root "$PWD/mimi-ci-pack" --frames 0,42,138,432 --out artifacts/frames
+```
 
 ## Layout
 
