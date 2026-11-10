@@ -1,0 +1,217 @@
+name: Render test frames
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check-scripts:
+    name: Check scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python requirements
+        run: python -m pip install -r requirements.txt
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Byte-compile scripts
+        run: python -m py_compile scripts/*.py
+
+      - name: Import-check scripts that do not need assets
+        run: |
+          set -euo pipefail
+          # Several builders mkdir under the hard-coded asset root at import
+          # time. That does not read plates, but the directory has to be writable.
+          if [ ! -w /workspace ]; then
+            sudo mkdir -p /workspace
+            sudo chown "$(id -u):$(id -g)" /workspace
+          fi
+          python - << 'PY'
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          # These import with numpy + opencv and do not open plates, clips, or mattes.
+          # They may create empty directories under /workspace/lofi-v41-meow.
+          safe = [
+              "build_v41aa_ex",
+              "build_v41ab_ex",
+              "build_v41ac_ex",
+              "build_v41ad_ex",
+              "build_v41ae_ex",
+              "build_v41af_ex",
+              "build_v41ag_ex",
+              "build_v41ah_ex",
+              "build_v41b",
+              "build_v41c",
+              "build_v41e",
+              "build_v41f",
+              "build_v41f_r2",
+              "build_v41g",
+              "build_v41h",
+              "build_v41i",
+              "build_v41j",
+              "build_v41j_r2",
+              "build_v41p_ex",
+              "build_v41q_ex",
+              "build_v41r_ex",
+              "build_v41s_ex",
+              "build_v41t_ex",
+              "build_v41u_ex",
+              "build_v41v_ex",
+              "build_v41w_ex",
+              "build_v41x_ex",
+              "build_v41y_ex",
+              "build_v41z_ex",
+              "proto_v41x_ex",
+          ]
+          # Need local media, or packages that are not in requirements.txt.
+          skipped = {
+              "build_v41_mouth": "reads v30/v24 video and v31 mouth params at import",
+              "build_v41_mouth_r1": "reads v30/v24 video and v31 mouth params at import",
+              "build_v41_mouth_r2": "reads v30/v24 video and v31 mouth params at import",
+              "build_v41_mouth_r3": "reads v30/v24 video and v31 mouth params at import",
+              "build_v41d": "imports build_v41_mouth, which needs those assets",
+              "build_v41k": "imports build_v41d, which needs those assets",
+              "build_v41l": "imports build_v41d, which needs those assets",
+              "make_before_after": "opens cycle json and test encodes at import",
+              "make_whole_face_ba": "opens cycle json and test encodes at import",
+              "mix_v41_audio": "reads PCM stems at import",
+              "precompute_v41f_mattes": "needs Pillow and rembg, then a lossless span",
+              "render_v41_span": "imports compositor from /workspace/lofi-v30-final and loads cycle npy",
+              "verify_round": "decodes an encoded mp4 at import",
+          }
+          root = Path("scripts")
+          missing = [name for name in safe if not (root / f"{name}.py").is_file()]
+          if missing:
+              sys.exit("missing scripts: " + ", ".join(missing))
+          known = set(safe) | set(skipped)
+          extra = sorted(p.stem for p in root.glob("*.py") if p.stem not in known)
+          if extra:
+              sys.exit("unclassified scripts (add to safe or skipped): " + ", ".join(extra))
+          failed = []
+          for name in safe:
+              proc = subprocess.run(
+                  [sys.executable, "-c", f"import sys; sys.path.insert(0, 'scripts'); import {name}"],
+                  capture_output=True,
+                  text=True,
+              )
+              if proc.returncode != 0:
+                  tail = (proc.stderr or proc.stdout).strip().splitlines()
+                  failed.append(f"{name}: {tail[-1] if tail else 'no output'}")
+                  print(proc.stderr, file=sys.stderr)
+              else:
+                  print(f"imported {name}")
+          print("skipped (need assets or extra packages):")
+          for name, why in skipped.items():
+              print(f"  {name}: {why}")
+          if failed:
+              sys.exit("import check failed:\n" + "\n".join(failed))
+          PY
+
+  render-test-frames:
+    name: Render test frames
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Look for plates and see if a render entry point can run
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          assets_dir=false
+          release_asset=false
+          hardcoded=false
+
+          if [ -d assets ] && find assets -type f -print -quit | grep -q .; then
+            assets_dir=true
+          fi
+
+          names="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" --jq '.[].assets[].name' || true)"
+          if printf '%s\n' "$names" | grep -qx 'mimi-assets.tar.gz'; then
+            release_asset=true
+          fi
+
+          # Real entry points, inspected from the scripts. Both pin absolute paths.
+          # render_v41_span.py: no argv. Imports compositor from /workspace/lofi-v30-final,
+          # loads /workspace/lofi-v41-meow/cycle/*.npy, encodes the full 890s–915s span.
+          # build_v41ah_ex.py (latest builder): main() takes --preview and --mouth-ref,
+          # but P is Path('/workspace/lofi-v41-meow') and sibling imports are loaded from there.
+          if grep -q '/workspace/' scripts/render_v41_span.py scripts/build_v41ah_ex.py; then
+            hardcoded=true
+          fi
+
+          can_render=false
+          if [ "$hardcoded" = false ] && { [ "$assets_dir" = true ] || [ "$release_asset" = true ]; }; then
+            can_render=true
+          fi
+
+          {
+            echo "assets_dir=$assets_dir"
+            echo "release_asset=$release_asset"
+            echo "hardcoded=$hardcoded"
+            echo "can_render=$can_render"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "assets/ present: $assets_dir"
+          echo "release asset mimi-assets.tar.gz: $release_asset"
+          echo "hard-coded /workspace paths: $hardcoded"
+          echo "can render: $can_render"
+
+      - name: Skip render until assets and paths are ready
+        if: steps.gate.outputs.can_render != 'true'
+        run: |
+          set -euo pipefail
+          assets_dir="${{ steps.gate.outputs.assets_dir }}"
+          release_asset="${{ steps.gate.outputs.release_asset }}"
+          hardcoded="${{ steps.gate.outputs.hardcoded }}"
+
+          {
+            echo "Render test frames skipped."
+            echo
+            if [ "$assets_dir" != true ] && [ "$release_asset" != true ]; then
+              echo "Source plates and generated clips must be added to the repo or a release first."
+              echo "This job looks for an assets/ folder in the checkout, or a GitHub release asset named mimi-assets.tar.gz."
+              echo "Neither is available, so there is nothing to fetch."
+            else
+              echo "Asset source found (assets/: $assets_dir, release mimi-assets.tar.gz: $release_asset)."
+            fi
+            echo
+            if [ "$hardcoded" = true ]; then
+              echo "Rendering stays skipped because the scripts hard-code /workspace paths. Fetching assets into assets/ would not feed them."
+              echo "What would need to change before this job can render a few frames:"
+              echo
+              echo "- scripts/render_v41_span.py has no arguments. On launch it imports compositor from /workspace/lofi-v30-final, reads /workspace/lofi-v41-meow/cycle/v41-medium-cycle.npy, v41-mrrrp-cycle.npy, v41-growl-cycle.npy, v41-big-cycle.npy, and v41-medium-params.json, and encodes every frame from 890*24 through 915*24 into /workspace/lofi-v41-meow/work/v41-span-890-915-lossless.mkv and v41-test-25s.mp4. It needs an asset-root argument and a frame list that writes a few PNGs, instead of running the full span."
+              echo "- The latest builder is scripts/build_v41ah_ex.py. Entry point is main(), arguments --preview and --mouth-ref. It sets P = Path('/workspace/lofi-v41-meow'), inserts that directory on sys.path, and imports build_v41h, build_v41y_ex, build_v41z_ex, build_v41t_ex, and build_v41aa_ex. --preview still requires the u-ex plates, encodes v41u-ex through v41af-ex, the PCM stem, and mattes v41ab-ex/mattes/g1v3 and g2v3, and writes PNGs to /workspace/lofi-v41-meow/qc/v41ah-ex/preview. Point P (and those imports) at the fetched tree, and write the preview frames somewhere this job can upload."
+              echo
+              echo "No stand-in entry point is called. The render step stays skipped until those paths are parameterized and the plates are in assets/ or in the mimi-assets.tar.gz release."
+            fi
+          } | tee "$RUNNER_TEMP/render-skip.txt"
+
+          # Short annotation for the check summary. The full note is in the log above.
+          echo "::notice title=Render test frames skipped::Source plates and generated clips must be in assets/ or a release asset named mimi-assets.tar.gz, and render_v41_span.py / build_v41ah_ex.py must stop hard-coding /workspace before this job can render frames. See the step log."
+
+      - name: Fetch assets and render test frames
+        if: steps.gate.outputs.can_render == 'true'
+        run: |
+          set -euo pipefail
+          echo "Assets are present and the render scripts no longer hard-code /workspace."
+          echo "Wire this step to the real entry point (render_v41_span.py or build_v41ah_ex.py --preview) once it accepts an asset root and writes a few PNGs. No command is invented here."
+          exit 1
+
+      - name: Upload test frames
+        if: steps.gate.outputs.can_render == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-frames
+          path: test-frames/
+          if-no-files-found: error

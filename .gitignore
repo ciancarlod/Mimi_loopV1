@@ -1,0 +1,37 @@
+# Render outputs and local media. Plates, generated clips, mattes, and
+# encodes (about 42 GB) live off-repo and must not be committed.
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.webm
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.tif
+*.tiff
+*.bmp
+*.npy
+*.npz
+*.wav
+*.aac
+*.flac
+*.mp3
+*.m4a
+*.f32le
+qc/
+genvid/
+
+# Hard-coded asset tree when this checkout itself lives at /workspace.
+/lofi-v41-meow/
+
+# Bytecode from local py_compile / import checks.
+__pycache__/
+*.pyc
+
+# A future assets/ tree (or the mimi-assets.tar.gz release) is how the
+# render workflow finds plates. Keep those files trackable.
+!assets/
+!assets/**
